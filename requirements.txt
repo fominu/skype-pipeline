@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+google-cloud-storage
+google-cloud-speech==2.*
+google-genai
+reportlab
