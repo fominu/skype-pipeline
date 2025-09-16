@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# необязательно, но полезно иметь системные зависимости для reportlab
+# Библиотеки для reportlab
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libfreetype6 libjpeg62-turbo zlib1g && rm -rf /var/lib/apt/lists/*
 
@@ -12,5 +12,5 @@ COPY main.py .
 
 ENV PYTHONUNBUFFERED=1
 
-# Cloud Run передаёт PORT; по умолчанию 8080
+# Cloud Run отдаёт переменную PORT — слушаем её
 CMD exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}
