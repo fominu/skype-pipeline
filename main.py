@@ -1,30 +1,39 @@
-# main.py
 import os
 import io
 from fastapi import FastAPI, Request
-from google.cloud import storage
-from google.cloud import speech_v2
-from google.cloud.speech_v2.types import cloud_speech
-from google import genai
 from reportlab.pdfgen import canvas
 
+# Конфиг из ENV
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
 SPEECH_LOCATION = os.getenv("SPEECH_LOCATION", "global")
 PDF_BUCKET = os.getenv("PDF_BUCKET")
 LANG = os.getenv("LANG", "ru-RU")
 SPEAKER_COUNT = int(os.getenv("SPEAKER_COUNT", "2"))
+GENAI_MODEL = os.getenv("GENAI_MODEL", "gemini-2.5-flash")  # через google-genai
 
 app = FastAPI()
 
-storage_client = storage.Client()
-speech_client = speech_v2.SpeechClient()
-genai_client = genai.Client()  # Vertex AI через google-genai
-
 @app.get("/")
 def health():
-    return {"status": "ok"}  # healthcheck, Cloud Run увидит, что сервер жив
+    return {"status": "ok"}  # Cloud Run healthcheck
+
+def get_storage_client():
+    from google.cloud import storage
+    return storage.Client()
+
+def get_speech_client():
+    from google.cloud import speech_v2
+    return speech_v2.SpeechClient()
+
+def get_genai_client():
+    # Инициализируем клиента только когда нужен
+    from google import genai
+    return genai.Client()  # использует GOOGLE_GENAI_USE_VERTEXAI и проект/локацию из ENV
 
 def transcribe_gcs_uri(gcs_uri: str) -> str:
+    from google.cloud.speech_v2.types import cloud_speech
+    speech_client = get_speech_client()
+
     req = cloud_speech.BatchRecognizeRequest(
         recognizer=f"projects/{PROJECT_ID}/locations/{SPEECH_LOCATION}/recognizers/_",
         config=cloud_speech.RecognitionConfig(
@@ -47,6 +56,7 @@ def transcribe_gcs_uri(gcs_uri: str) -> str:
     op = speech_client.batch_recognize(request=req)
     resp = op.result(timeout=3600)
 
+    # Склейка текста
     lines = []
     for file_result in resp.results:
         for r in file_result.transcript.results:
@@ -57,6 +67,7 @@ def transcribe_gcs_uri(gcs_uri: str) -> str:
     return "\n".join(lines)
 
 def summarize(text: str, extra_prompt: str = "") -> str:
+    client = get_genai_client()
     prompt = f"""Ты помощник по встречам.
 Нужно выдать:
 1) Краткое резюме (3–5 предложений)
@@ -69,8 +80,8 @@ def summarize(text: str, extra_prompt: str = "") -> str:
     if extra_prompt:
         prompt += f"\nДоп.инструкции:\n{extra_prompt}\n"
 
-    r = genai_client.models.generate_content(
-        model=os.getenv("GENAI_MODEL", "gemini-2.5-flash"),
+    r = client.models.generate_content(
+        model=GENAI_MODEL,
         contents=prompt,
     )
     return r.text
@@ -89,38 +100,9 @@ def make_pdf(content: str) -> bytes:
     return buf.read()
 
 def parse_event(ev: dict):
-    # Eventarc Storage -> Pub/Sub формат
+    # Eventarc (Cloud Storage → Pub/Sub) формат
     if "message" in ev and "attributes" in ev["message"]:
         attrs = ev["message"]["attributes"]
         return attrs.get("bucketId"), attrs.get("objectId")
-
-    # Прямой Cloud Storage push (на всякий случай)
-    if "bucket" in ev and "name" in ev:
-        return ev["bucket"], ev["name"]
-
-    # Универсальный data
-    if "data" in ev and isinstance(ev["data"], dict):
-        d = ev["data"]
-        if "bucket" in d and "name" in d:
-            return d["bucket"], d["name"]
-
-    return None, None
-
-@app.post("/ingest")
-async def ingest(request: Request):
-    event = await request.json()
-    bucket, name = parse_event(event)
-    if not bucket or not name or not name.lower().endswith(".mp4"):
-        return {"status": "skipped", "reason": "no mp4 event"}
-
-    gcs_uri = f"gs://{bucket}/{name}"
-
-    text = transcribe_gcs_uri(gcs_uri)
-    summary = summarize(text, extra_prompt=os.getenv("SUMMARY_PROMPT", "Анализ, выводы встречи тезисно."))
-    pdf_bytes = make_pdf(summary)
-
-    outfile = name.rsplit("/", 1)[-1].rsplit(".", 1)[0] + ".pdf"
-    storage_client.bucket(PDF_BUCKET).blob(outfile).upload_from_string(
-        pdf_bytes, content_type="application/pdf"
-    )
-    return {"status": "ok", "pdf": f"gs://{PDF_BUCKET}/{outfile}"}
+    # Прямой Cloud Storage push (редко)
+    if "bucket" in ev and "name"
